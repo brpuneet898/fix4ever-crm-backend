@@ -1,0 +1,97 @@
+# ------------------------------
+# Dependencies
+# ------------------------------
+node_modules/
+
+# ------------------------------
+# Build Output
+# ------------------------------
+dist/
+build/
+out/
+
+# ------------------------------
+# Environment Variables
+# ------------------------------
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+
+# Example env file should be tracked
+!.env.example
+
+# ------------------------------
+# Logs
+# ------------------------------
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ------------------------------
+# Runtime Data
+# ------------------------------
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# ------------------------------
+# Coverage / Testing
+# ------------------------------
+coverage/
+.nyc_output/
+jest-html-reporters-*
+
+# ------------------------------
+# Cache
+# ------------------------------
+.cache
+.tmp
+temp/
+*.tsbuildinfo
+
+# ------------------------------
+# OS Files
+# ------------------------------
+.DS_Store
+Thumbs.db
+
+# ------------------------------
+# IDE / Editor
+# ------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+
+# ------------------------------
+# Docker
+# ------------------------------
+docker-compose.override.yml
+
+# ------------------------------
+# Package Managers
+# ------------------------------
+.pnpm-store
+.yarn/
+.yarn-cache/
+.yarnrc.yml
+
+# ------------------------------
+# Local Development Files
+# ------------------------------
+local.settings.json
+
+# ------------------------------
+# Misc
+# ------------------------------
+*.tgz
+*.bak
+*.orig
