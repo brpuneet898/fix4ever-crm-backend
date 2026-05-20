@@ -26,6 +26,8 @@ export const PERMISSIONS = {
   CUSTOMERS_REFERRAL_VIEW: "customers.referral_view",
   CUSTOMERS_SEGMENT: "customers.segment", // build segments / cohorts
   CUSTOMERS_DISCOUNT_ASSIGN: "customers.discount_assign",
+  CUSTOMERS_REPAIR_HISTORY_VIEW: "customers.repair_history.view",
+  CUSTOMERS_PAYMENTS_VIEW: "customers.payments.view",
 
   // ─── VENDOR / TECHNICIAN MANAGEMENT ──────────────────────────────────────
   // PDF: Admin p.11, Regional Manager p.16
@@ -220,6 +222,17 @@ export const PERMISSIONS = {
   ADMIN_USERS_DELETE: "admin_users.delete",
   ADMIN_ROLES_ASSIGN: "admin_roles.assign",
   ADMIN_PERMISSIONS_OVERRIDE: "admin_permissions.override",
+
+  // ─── CAPTAINS (DELIVERY DRIVERS) ─────────────────────────────────────────
+  CAPTAINS_READ: "captains.read",             // view list + profile
+  CAPTAINS_UPDATE: "captains.update",          // edit info + documents
+  CAPTAINS_APPROVE: "captains.approve",        // approve / reject onboarding
+  CAPTAINS_SUSPEND: "captains.suspend",        // suspend / reactivate
+  CAPTAINS_WALLET_VIEW: "captains.wallet_view", // balance, transactions, analytics
+  CAPTAINS_SETTLEMENTS_APPROVE: "captains.settlements_approve", // approve/reject withdrawals
+  CAPTAINS_EXPORT: "captains.export",          // export captain data
+  CAPTAINS_LIVE_ORDERS: "captains.live_orders", // live assigned trips
+  CAPTAINS_HISTORY: "captains.history",        // completed trip history
 
   // ─── LOYALTY & RETENTION ─────────────────────────────────────────────────
   // PDF: CRM Manager p.15

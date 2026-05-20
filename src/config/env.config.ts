@@ -49,6 +49,13 @@ const envSchema = z.object({
   // Seeding
   SEED_ADMIN_EMAIL: z.string().email().default("admin@fix4ever.com"),
   SEED_ADMIN_PASSWORD: z.string().min(8).default("Admin@123456"),
+
+  // Main-app bridge — required for segment notification delivery and support chat
+  // MAIN_BACKEND_URL: base URL of the main-app backend (e.g. http://localhost:8080)
+  // INTERNAL_API_SECRET: shared secret that must match main-app INTERNAL_API_SECRET
+  MAIN_APP_URL: z.string().url().optional(),
+  MAIN_BACKEND_URL: z.string().url().optional(),
+  INTERNAL_API_SECRET: z.string().min(16).optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

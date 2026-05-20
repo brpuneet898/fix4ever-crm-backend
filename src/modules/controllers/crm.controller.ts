@@ -20,6 +20,8 @@ import {
   crmBlockCustomer,
   crmUnblockCustomer,
   crmGetCustomerInteractions,
+  crmGetCustomerServiceHistory,
+  crmGetCustomerPaymentHistory,
   crmManageSubscription,
   crmGetCustomerSubscriptions,
   crmGetCustomerWalletTransactions,
@@ -258,6 +260,65 @@ export async function getCustomerWallet(
       page,
       limit,
       "Wallet transactions",
+    ),
+  );
+}
+
+export async function getCustomerServiceHistoryController(
+  req: FastifyRequest,
+  reply: FastifyReply,
+) {
+  const { customerId } = req.params as { customerId: string };
+  const filter = z
+    .object({
+      status: z.string().optional(),
+      serviceType: z.string().optional(),
+      from: z
+        .string()
+        .datetime()
+        .optional()
+        .transform((v) => (v ? new Date(v) : undefined)),
+      to: z
+        .string()
+        .datetime()
+        .optional()
+        .transform((v) => (v ? new Date(v) : undefined)),
+      page: z.coerce.number().default(1),
+      limit: z.coerce.number().max(100).default(20),
+    })
+    .parse(req.query);
+  const data = await crmGetCustomerServiceHistory(customerId, filter);
+  return reply.send(
+    paginatedResponse(
+      data.requests,
+      data.total,
+      data.page,
+      data.limit,
+      "Customer service history",
+    ),
+  );
+}
+
+export async function getCustomerPaymentHistoryController(
+  req: FastifyRequest,
+  reply: FastifyReply,
+) {
+  const { customerId } = req.params as { customerId: string };
+  const filter = z
+    .object({
+      status: z.string().optional(),
+      page: z.coerce.number().default(1),
+      limit: z.coerce.number().max(100).default(20),
+    })
+    .parse(req.query);
+  const data = await crmGetCustomerPaymentHistory(customerId, filter);
+  return reply.send(
+    paginatedResponse(
+      data.payments,
+      data.total,
+      data.page,
+      data.limit,
+      "Customer payment history",
     ),
   );
 }

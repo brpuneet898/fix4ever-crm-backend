@@ -41,6 +41,10 @@ export function sanitizeUser(user: IUserDocument) {
     email: user.email,
     role: user.role,
     roles: user.roles,
+    permissions: buildEffectivePermissions({
+      role: user.role,
+      permissionOverrides: user.permissionOverrides,
+    }),
     avatar: user.avatar,
     isActive: user.isActive,
   };

@@ -25,7 +25,15 @@ export type CampaignTargetSegment =
   | "new_this_month"
   | "high_value"
   | "regional"
-  | "custom";
+  | "custom"
+  // Behavior-based segments
+  | "repeat_customers"
+  | "new_customers"
+  | "device_laptop"
+  | "device_mobile"
+  | "high_spenders"
+  | "onsite_users"
+  | "pickup_drop_users";
 export type CampaignApprovalStatus = "pending" | "approved" | "rejected";
 
 export interface ICampaign {
@@ -38,6 +46,8 @@ export interface ICampaign {
   targetRegion?: string;
   /** For custom segments: array of userId strings */
   targetUserIds?: string[];
+  /** Optional city filter applied on top of the segment (case-insensitive match) */
+  targetCities?: string[];
   content: {
     subject?: string;
     body: string;
@@ -98,11 +108,19 @@ const campaignSchema = new Schema<ICampaignDocument>(
         "high_value",
         "regional",
         "custom",
+        "repeat_customers",
+        "new_customers",
+        "device_laptop",
+        "device_mobile",
+        "high_spenders",
+        "onsite_users",
+        "pickup_drop_users",
       ],
       required: true,
     },
     targetRegion: { type: String, trim: true },
     targetUserIds: [{ type: String }],
+    targetCities: [{ type: String, trim: true }],
     content: {
       subject: { type: String },
       body: { type: String, required: true },

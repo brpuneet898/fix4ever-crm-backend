@@ -26,6 +26,13 @@ import type {
   CampaignType,
   CampaignTargetSegment,
 } from "../models/campaign/campaign.model";
+import { CampaignTemplate } from "../models/campaign/campaignTemplate.model";
+import { FollowUpRule } from "../models/followUpRule.model";
+import { runRule } from "../../jobs/followUp.job";
+import {
+  containsVariables,
+  resolvePersonalizedContent,
+} from "../utils/personalize";
 import { ApiError } from "../errors/ApiError";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -229,6 +236,81 @@ export async function crmSegmentCustomers(
       query._id = { $nin: subscribedIds };
       break;
     }
+
+    // ── Subscription dimension ──────────────────────────────────────────────
+    case "trial": {
+      const ids = await UserSubscription.distinct("userId", { status: "trial" });
+      query._id = { $in: ids };
+      break;
+    }
+    case "expired_subscription": {
+      const ids = await UserSubscription.distinct("userId", { status: "expired" });
+      query._id = { $in: ids };
+      break;
+    }
+    case "cancelled_subscription": {
+      const ids = await UserSubscription.distinct("userId", {
+        status: "cancelled",
+      });
+      query._id = { $in: ids };
+      break;
+    }
+
+    // ── Service-usage dimension ──────────────────────────────────────────────
+    case "returning": {
+      // Customers with ≥ 2 completed service requests
+      const rows = await mongoose.model("ServiceRequest").aggregate([
+        { $match: { status: "Completed" } },
+        { $group: { _id: "$customerId", count: { $sum: 1 } } },
+        { $match: { count: { $gte: 2 } } },
+      ]);
+      query._id = { $in: rows.map((r) => r._id) };
+      break;
+    }
+    case "high_usage": {
+      // Customers with ≥ 5 service requests (any status)
+      const rows = await mongoose.model("ServiceRequest").aggregate([
+        { $group: { _id: "$customerId", count: { $sum: 1 } } },
+        { $match: { count: { $gte: 5 } } },
+      ]);
+      query._id = { $in: rows.map((r) => r._id) };
+      break;
+    }
+    case "recent_active": {
+      // Customers who raised an SR in the last 30 days
+      const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const ids = await mongoose
+        .model("ServiceRequest")
+        .distinct("customerId", { createdAt: { $gte: since } });
+      query._id = { $in: ids };
+      break;
+    }
+
+    // ── Loyalty / churn dimension ────────────────────────────────────────────
+    case "at_risk": {
+      // Last SR was 45–90 days ago — active enough to have used the product,
+      // but haven't returned recently (potential churn)
+      const now = Date.now();
+      const from = new Date(now - 90 * 24 * 60 * 60 * 1000);
+      const to = new Date(now - 45 * 24 * 60 * 60 * 1000);
+      const rows = await mongoose.model("ServiceRequest").aggregate([
+        { $sort: { createdAt: -1 } },
+        { $group: { _id: "$customerId", lastSR: { $first: "$createdAt" } } },
+        { $match: { lastSR: { $gte: from, $lte: to } } },
+      ]);
+      query._id = { $in: rows.map((r) => r._id) };
+      break;
+    }
+    case "wallet_active": {
+      // Customers with a positive wallet balance
+      const ids = await CustomerWallet.distinct("userId", {
+        balance: { $gt: 0 },
+        isActive: true,
+      });
+      query._id = { $in: ids };
+      break;
+    }
+
     default:
       break;
   }
@@ -239,6 +321,362 @@ export async function crmSegmentCustomers(
   ]);
 
   return { customers, total, segment: segmentType, page, limit };
+}
+
+/**
+ * Resolves a segment name to an array of customer user IDs (no pagination).
+ * Reuses the same switch logic as crmSegmentCustomers — single source of truth.
+ * Used by crmDeliverNotificationToSegment to identify who to notify.
+ */
+export async function crmGetSegmentUserIds(
+  segmentType: string,
+): Promise<string[]> {
+  let query: Record<string, unknown> = { role: "user" };
+
+  switch (segmentType) {
+    case "active_subscribers": {
+      const ids = await UserSubscription.distinct("userId", { status: "active" });
+      query._id = { $in: ids };
+      break;
+    }
+    case "inactive":
+      query.isActive = false;
+      break;
+    case "new_this_month": {
+      const monthStart = new Date();
+      monthStart.setDate(1);
+      monthStart.setHours(0, 0, 0, 0);
+      query.createdAt = { $gte: monthStart };
+      break;
+    }
+    case "high_value": {
+      const rows = await mongoose.model("ServiceRequest").aggregate([
+        { $match: { status: "Completed" } },
+        { $group: { _id: "$customerId", totalSpent: { $sum: "$adminFinalPrice" } } },
+        { $match: { totalSpent: { $gt: 0 } } },
+        { $sort: { totalSpent: -1 } },
+        { $limit: 500 },
+      ]);
+      query._id = { $in: rows.map((x: any) => x._id) };
+      break;
+    }
+    case "no_subscription": {
+      const subscribedIds = await UserSubscription.distinct("userId", {
+        status: { $in: ["active", "trial"] },
+      });
+      query._id = { $nin: subscribedIds };
+      break;
+    }
+    case "trial": {
+      const ids = await UserSubscription.distinct("userId", { status: "trial" });
+      query._id = { $in: ids };
+      break;
+    }
+    case "expired_subscription": {
+      const ids = await UserSubscription.distinct("userId", { status: "expired" });
+      query._id = { $in: ids };
+      break;
+    }
+    case "cancelled_subscription": {
+      const ids = await UserSubscription.distinct("userId", { status: "cancelled" });
+      query._id = { $in: ids };
+      break;
+    }
+    case "returning": {
+      const rows = await mongoose.model("ServiceRequest").aggregate([
+        { $match: { status: "Completed" } },
+        { $group: { _id: "$customerId", count: { $sum: 1 } } },
+        { $match: { count: { $gte: 2 } } },
+      ]);
+      query._id = { $in: rows.map((r: any) => r._id) };
+      break;
+    }
+    case "high_usage": {
+      const rows = await mongoose.model("ServiceRequest").aggregate([
+        { $group: { _id: "$customerId", count: { $sum: 1 } } },
+        { $match: { count: { $gte: 5 } } },
+      ]);
+      query._id = { $in: rows.map((r: any) => r._id) };
+      break;
+    }
+    case "recent_active": {
+      const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const ids = await mongoose
+        .model("ServiceRequest")
+        .distinct("customerId", { createdAt: { $gte: since } });
+      query._id = { $in: ids };
+      break;
+    }
+    case "at_risk": {
+      const now = Date.now();
+      const from = new Date(now - 90 * 24 * 60 * 60 * 1000);
+      const to = new Date(now - 45 * 24 * 60 * 60 * 1000);
+      const rows = await mongoose.model("ServiceRequest").aggregate([
+        { $sort: { createdAt: -1 } },
+        { $group: { _id: "$customerId", lastSR: { $first: "$createdAt" } } },
+        { $match: { lastSR: { $gte: from, $lte: to } } },
+      ]);
+      query._id = { $in: rows.map((r: any) => r._id) };
+      break;
+    }
+    case "wallet_active": {
+      const ids = await CustomerWallet.distinct("userId", {
+        balance: { $gt: 0 },
+        isActive: true,
+      });
+      query._id = { $in: ids };
+      break;
+    }
+    // ── Behavior-based segments ──────────────────────────────────────────────
+    case "repeat_customers": {
+      const rows = await mongoose.model("ServiceRequest").aggregate([
+        { $match: { status: "Completed" } },
+        { $group: { _id: "$customerId", count: { $sum: 1 } } },
+        { $match: { count: { $gte: 2 } } },
+      ]);
+      query._id = { $in: rows.map((r: { _id: unknown }) => r._id) };
+      break;
+    }
+    case "new_customers": {
+      const rows = await mongoose.model("ServiceRequest").aggregate([
+        { $match: { status: "Completed" } },
+        { $group: { _id: "$customerId", count: { $sum: 1 } } },
+        { $match: { count: { $eq: 1 } } },
+      ]);
+      query._id = { $in: rows.map((r: { _id: unknown }) => r._id) };
+      break;
+    }
+    case "device_laptop": {
+      const ids = await mongoose
+        .model("ServiceRequest")
+        .distinct("customerId", {
+          deviceCategory: { $regex: /laptop/i },
+          status: "Completed",
+        });
+      query._id = { $in: ids };
+      break;
+    }
+    case "device_mobile": {
+      const ids = await mongoose
+        .model("ServiceRequest")
+        .distinct("customerId", {
+          deviceCategory: { $regex: /mobile|phone/i },
+          status: "Completed",
+        });
+      query._id = { $in: ids };
+      break;
+    }
+    case "high_spenders": {
+      const rows = await mongoose.model("ServiceRequest").aggregate([
+        { $match: { status: "Completed" } },
+        { $group: { _id: "$customerId", totalSpent: { $sum: "$adminFinalPrice" } } },
+        { $match: { totalSpent: { $gt: 5000 } } },
+        { $sort: { totalSpent: -1 } },
+      ]);
+      query._id = { $in: rows.map((r: { _id: unknown }) => r._id) };
+      break;
+    }
+    case "onsite_users": {
+      const ids = await mongoose
+        .model("ServiceRequest")
+        .distinct("customerId", { serviceType: "onsite", status: "Completed" });
+      query._id = { $in: ids };
+      break;
+    }
+    case "pickup_drop_users": {
+      const ids = await mongoose
+        .model("ServiceRequest")
+        .distinct("customerId", {
+          serviceType: "pickup-drop",
+          status: "Completed",
+        });
+      query._id = { $in: ids };
+      break;
+    }
+    default:
+      break;
+  }
+
+  const users = await User.find(query).select("_id").lean();
+  return users.map((u: { _id: unknown }) => String(u._id));
+}
+
+/**
+ * Delivers an in-app notification to all customers in a segment by calling
+ * the main-app's internal bridge endpoint (POST /internal/notify).
+ *
+ * The main app handles:
+ *   - Inserting Notification documents into the shared MongoDB collection
+ *   - Emitting Socket.IO "notification" events for real-time delivery
+ *
+ * Returns { sent, failed } counts from the main-app response.
+ * Throws ApiError if the bridge is not configured or the call fails.
+ */
+export async function crmDeliverNotificationToSegment(opts: {
+  segment: string;
+  title: string;
+  message: string;
+}): Promise<{ sent: number; failed: number; total: number }> {
+  const { env } = await import("../../config/env.config");
+
+  if (!env.MAIN_APP_URL || !env.INTERNAL_API_SECRET) {
+    throw ApiError.badRequest(
+      "Main-app bridge is not configured. Set MAIN_APP_URL and INTERNAL_API_SECRET in the CRM .env file.",
+    );
+  }
+
+  // Resolve segment → user IDs
+  const userIds = await crmGetSegmentUserIds(opts.segment);
+  if (userIds.length === 0) {
+    return { sent: 0, failed: 0, total: 0 };
+  }
+
+  // Call main-app internal endpoint in batches of 1000 to stay within payload limits
+  const BATCH = 1000;
+  let totalSent = 0;
+  let totalFailed = 0;
+
+  for (let i = 0; i < userIds.length; i += BATCH) {
+    const batch = userIds.slice(i, i + BATCH);
+    const response = await fetch(`${env.MAIN_APP_URL}/internal/notify`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-internal-secret": env.INTERNAL_API_SECRET,
+      },
+      body: JSON.stringify({
+        users: batch,
+        title: opts.title,
+        message: opts.message,
+        segment: opts.segment,
+      }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw ApiError.badRequest(
+        `Main-app bridge returned ${response.status}: ${text}`,
+      );
+    }
+
+    const json = (await response.json()) as { sent?: number; failed?: number };
+    totalSent += json.sent ?? 0;
+    totalFailed += json.failed ?? 0;
+  }
+
+  return { sent: totalSent, failed: totalFailed, total: userIds.length };
+}
+
+/**
+ * Returns counts for all segments in a single call.
+ * Used by the frontend to display live count badges without N separate API calls.
+ */
+export async function crmGetSegmentOverview() {
+  const now = Date.now();
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const since30 = new Date(now - 30 * 24 * 60 * 60 * 1000);
+  const atRiskFrom = new Date(now - 90 * 24 * 60 * 60 * 1000);
+  const atRiskTo = new Date(now - 45 * 24 * 60 * 60 * 1000);
+
+  const [
+    total,
+    activeSubscriberIds,
+    inactive,
+    newThisMonth,
+    trialIds,
+    expiredIds,
+    cancelledIds,
+    noSubIds,
+    highValueRows,
+    returningRows,
+    highUsageRows,
+    recentActiveIds,
+    atRiskRows,
+    walletActiveIds,
+  ] = await Promise.all([
+    User.countDocuments({ role: "user" }),
+    UserSubscription.distinct("userId", { status: "active" }),
+    User.countDocuments({ role: "user", isActive: false }),
+    User.countDocuments({ role: "user", createdAt: { $gte: monthStart } }),
+    UserSubscription.distinct("userId", { status: "trial" }),
+    UserSubscription.distinct("userId", { status: "expired" }),
+    UserSubscription.distinct("userId", { status: "cancelled" }),
+    UserSubscription.distinct("userId", { status: { $in: ["active", "trial"] } }),
+    mongoose.model("ServiceRequest").aggregate([
+      { $match: { status: "Completed" } },
+      { $group: { _id: "$customerId", totalSpent: { $sum: "$adminFinalPrice" } } },
+      { $match: { totalSpent: { $gt: 0 } } },
+      { $limit: 500 },
+    ]),
+    mongoose.model("ServiceRequest").aggregate([
+      { $match: { status: "Completed" } },
+      { $group: { _id: "$customerId", count: { $sum: 1 } } },
+      { $match: { count: { $gte: 2 } } },
+    ]),
+    mongoose.model("ServiceRequest").aggregate([
+      { $group: { _id: "$customerId", count: { $sum: 1 } } },
+      { $match: { count: { $gte: 5 } } },
+    ]),
+    mongoose
+      .model("ServiceRequest")
+      .distinct("customerId", { createdAt: { $gte: since30 } }),
+    mongoose.model("ServiceRequest").aggregate([
+      { $sort: { createdAt: -1 } },
+      { $group: { _id: "$customerId", lastSR: { $first: "$createdAt" } } },
+      { $match: { lastSR: { $gte: atRiskFrom, $lte: atRiskTo } } },
+    ]),
+    CustomerWallet.distinct("userId", { balance: { $gt: 0 }, isActive: true }),
+  ]);
+
+  // Count users for id-list segments
+  const [
+    activeSubscribers,
+    trialCount,
+    expiredCount,
+    cancelledCount,
+    noSubscription,
+    highValue,
+    returning,
+    highUsage,
+    recentActive,
+    atRisk,
+    walletActive,
+  ] = await Promise.all([
+    User.countDocuments({ role: "user", _id: { $in: activeSubscriberIds } }),
+    User.countDocuments({ role: "user", _id: { $in: trialIds } }),
+    User.countDocuments({ role: "user", _id: { $in: expiredIds } }),
+    User.countDocuments({ role: "user", _id: { $in: cancelledIds } }),
+    User.countDocuments({ role: "user", _id: { $nin: noSubIds } }),
+    User.countDocuments({ role: "user", _id: { $in: highValueRows.map((r: { _id: unknown }) => r._id) } }),
+    User.countDocuments({ role: "user", _id: { $in: returningRows.map((r: { _id: unknown }) => r._id) } }),
+    User.countDocuments({ role: "user", _id: { $in: highUsageRows.map((r: { _id: unknown }) => r._id) } }),
+    User.countDocuments({ role: "user", _id: { $in: recentActiveIds } }),
+    User.countDocuments({ role: "user", _id: { $in: atRiskRows.map((r: { _id: unknown }) => r._id) } }),
+    User.countDocuments({ role: "user", _id: { $in: walletActiveIds } }),
+  ]);
+
+  return {
+    total,
+    // Demographics
+    newThisMonth,
+    // Service usage
+    returning,
+    highUsage,
+    recentActive,
+    // Subscription plans
+    activeSubscribers,
+    trial: trialCount,
+    expiredSubscription: expiredCount,
+    cancelledSubscription: cancelledCount,
+    noSubscription,
+    // Loyalty levels
+    highValue,
+    atRisk,
+    walletActive,
+    inactive,
+  };
 }
 
 /**
@@ -419,6 +857,114 @@ export async function crmEscalateServiceRequest(
   return sr;
 }
 
+export interface CrmSRUpdatePayload {
+  // Customer
+  userName?: string;
+  userPhone?: string;
+  beneficiaryName?: string;
+  beneficiaryPhone?: string;
+  requestType?: string;
+  // Location
+  address?: string;
+  city?: string;
+  location?: { address?: string; lat?: number; lng?: number };
+  customerLocation?: { latitude?: number; longitude?: number };
+  // Device
+  brand?: string;
+  model?: string;
+  deviceType?: string;
+  deviceBrand?: string;
+  deviceModel?: string;
+  // Service
+  serviceType?: string;
+  status?: string;
+  priority?: string;
+  isUrgent?: boolean;
+  // Problem
+  mainProblem?: { id: string; title: string };
+  subProblem?: { id: string; title: string };
+  relationalBehaviors?: unknown[];
+  minPrice?: number;
+  maxPrice?: number;
+  level?: string;
+  problemDescription?: string;
+  // Scheduling
+  preferredDate?: string;
+  preferredTime?: string;
+  scheduledDate?: string;
+  scheduledTime?: string;
+  scheduledSlot?: string;
+  // Pricing
+  adminFinalPrice?: number;
+  adminPricingNotes?: string;
+  adminComponentCharges?: number;
+  adminComponentNotes?: string;
+  // Assignment
+  assignedTechnician?: string;
+  assignedVendor?: string;
+  assignedCaptain?: string;
+  // Notes
+  technicianNotes?: string;
+  scheduleNotes?: string;
+}
+
+/**
+ * Full-field CRM edit for a service request.
+ * Accepts any combination of editable fields; only provided fields are written.
+ * Status changes are appended to statusHistory automatically.
+ */
+export async function crmUpdateServiceRequest(
+  requestId: string,
+  payload: CrmSRUpdatePayload,
+  crmUserId: string,
+) {
+  const SR = mongoose.model("ServiceRequest");
+  const identifierQuery =
+    /^[0-9a-fA-F]{24}$/.test(requestId) &&
+    mongoose.Types.ObjectId.isValid(requestId)
+      ? { _id: requestId }
+      : { request_id: requestId };
+
+  const current = (await SR.findOne(identifierQuery)
+    .select("status")
+    .lean()) as { status?: string } | null;
+  if (!current) throw ApiError.notFound("Service request not found");
+
+  // Build $set from only the keys present in payload
+  const $set: Record<string, unknown> = {};
+  const allowedFields: Array<keyof CrmSRUpdatePayload> = [
+    "userName", "userPhone", "beneficiaryName", "beneficiaryPhone", "requestType",
+    "address", "city", "location", "customerLocation",
+    "brand", "model", "deviceType", "deviceBrand", "deviceModel",
+    "serviceType", "status", "priority", "isUrgent",
+    "mainProblem", "subProblem", "relationalBehaviors", "minPrice", "maxPrice", "level", "problemDescription",
+    "preferredDate", "preferredTime", "scheduledDate", "scheduledTime", "scheduledSlot",
+    "adminFinalPrice", "adminPricingNotes", "adminComponentCharges", "adminComponentNotes",
+    "assignedTechnician", "assignedVendor", "assignedCaptain",
+    "technicianNotes", "scheduleNotes",
+  ];
+  for (const key of allowedFields) {
+    if (payload[key] !== undefined) $set[key] = payload[key];
+  }
+
+  const statusChanged = payload.status && payload.status !== current.status;
+  const update: Record<string, unknown> = { $set };
+  if (statusChanged) {
+    update.$push = {
+      statusHistory: {
+        status: payload.status,
+        timestamp: new Date(),
+        notes: `Status updated by CRM Manager`,
+        updatedBy: crmUserId,
+      },
+    };
+  }
+
+  const sr = await SR.findOneAndUpdate(identifierQuery, update, { new: true });
+  if (!sr) throw ApiError.notFound("Service request not found");
+  return sr;
+}
+
 /**
  * Tag a service request for categorization and reporting.
  */
@@ -462,52 +1008,189 @@ export async function crmTagServiceRequest(
  * Service request trend analysis: volume, status breakdown, recurring issues.
  */
 export async function crmGetServiceRequestTrends(from: Date, to: Date) {
-  const [statusBreakdown, byServiceType, byCity, topBrands, dailyVolume] =
-    await Promise.all([
-      mongoose
-        .model("ServiceRequest")
-        .aggregate([
-          { $match: { createdAt: { $gte: from, $lte: to } } },
-          { $group: { _id: "$status", count: { $sum: 1 } } },
-          { $sort: { count: -1 } },
-        ]),
-      mongoose
-        .model("ServiceRequest")
-        .aggregate([
-          { $match: { createdAt: { $gte: from, $lte: to } } },
-          { $group: { _id: "$serviceType", count: { $sum: 1 } } },
-        ]),
-      mongoose
-        .model("ServiceRequest")
-        .aggregate([
-          { $match: { createdAt: { $gte: from, $lte: to } } },
-          { $group: { _id: "$city", count: { $sum: 1 } } },
-          { $sort: { count: -1 } },
-          { $limit: 10 },
-        ]),
-      mongoose
-        .model("ServiceRequest")
-        .aggregate([
-          { $match: { createdAt: { $gte: from, $lte: to } } },
-          { $group: { _id: "$brand", count: { $sum: 1 } } },
-          { $sort: { count: -1 } },
-          { $limit: 10 },
-        ]),
-      mongoose.model("ServiceRequest").aggregate([
-        { $match: { createdAt: { $gte: from, $lte: to } } },
-        {
-          $group: {
-            _id: {
-              year: { $year: "$createdAt" },
-              month: { $month: "$createdAt" },
-              day: { $dayOfMonth: "$createdAt" },
-            },
-            count: { $sum: 1 },
+  const SR = mongoose.model("ServiceRequest");
+
+  const [
+    statusBreakdown,
+    byServiceType,
+    byCity,
+    topBrands,
+    dailyVolume,
+    recurringIssues,
+    topProblems,
+    cancellationReasons,
+    completionRateByServiceType,
+  ] = await Promise.all([
+    // Existing: status distribution
+    SR.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to } } },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+    ]),
+
+    // Existing: volume by service type
+    SR.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to } } },
+      { $group: { _id: "$serviceType", count: { $sum: 1 } } },
+    ]),
+
+    // Existing: top cities
+    SR.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to } } },
+      { $group: { _id: "$city", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 10 },
+    ]),
+
+    // Existing: top brands
+    SR.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to } } },
+      { $group: { _id: "$brand", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 10 },
+    ]),
+
+    // Existing: daily volume
+    SR.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to } } },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$createdAt" },
+            month: { $month: "$createdAt" },
+            day: { $dayOfMonth: "$createdAt" },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 } },
+    ]),
+
+    // NEW: recurring issues — brand + mainProblem combinations with ≥3 occurrences
+    SR.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: from, $lte: to },
+          "mainProblem.name": { $exists: true, $ne: null },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            brand: { $ifNull: ["$brand", "$deviceBrand"] },
+            problem: "$mainProblem.name",
+            subProblem: { $ifNull: ["$subProblem.name", null] },
+          },
+          count: { $sum: 1 },
+          statuses: { $addToSet: "$status" },
+          cancelledCount: {
+            $sum: { $cond: [{ $eq: ["$status", "Cancelled"] }, 1, 0] },
+          },
+          completedCount: {
+            $sum: { $cond: [{ $eq: ["$status", "Completed"] }, 1, 0] },
           },
         },
-        { $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 } },
-      ]),
-    ]);
+      },
+      { $match: { count: { $gte: 3 } } },
+      { $sort: { count: -1 } },
+      { $limit: 20 },
+      {
+        $project: {
+          brand: "$_id.brand",
+          problem: "$_id.problem",
+          subProblem: "$_id.subProblem",
+          count: 1,
+          cancelledCount: 1,
+          completedCount: 1,
+          cancellationRate: {
+            $cond: [
+              { $gt: ["$count", 0] },
+              { $multiply: [{ $divide: ["$cancelledCount", "$count"] }, 100] },
+              0,
+            ],
+          },
+        },
+      },
+    ]),
+
+    // NEW: top problem categories (mainProblem.name) by volume
+    SR.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: from, $lte: to },
+          "mainProblem.name": { $exists: true, $ne: null },
+        },
+      },
+      {
+        $group: {
+          _id: "$mainProblem.name",
+          count: { $sum: 1 },
+          completedCount: {
+            $sum: { $cond: [{ $eq: ["$status", "Completed"] }, 1, 0] },
+          },
+          cancelledCount: {
+            $sum: { $cond: [{ $eq: ["$status", "Cancelled"] }, 1, 0] },
+          },
+        },
+      },
+      { $sort: { count: -1 } },
+      { $limit: 10 },
+    ]),
+
+    // NEW: cancellation reason breakdown
+    SR.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: from, $lte: to },
+          status: "Cancelled",
+          cancellationReason: { $exists: true, $nin: [null, ""] },
+        },
+      },
+      {
+        $group: {
+          _id: "$cancellationReason",
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { count: -1 } },
+      { $limit: 10 },
+    ]),
+
+    // NEW: completion rate by service type (total, completed, rate%)
+    SR.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to } } },
+      {
+        $group: {
+          _id: "$serviceType",
+          total: { $sum: 1 },
+          completed: {
+            $sum: { $cond: [{ $eq: ["$status", "Completed"] }, 1, 0] },
+          },
+          cancelled: {
+            $sum: { $cond: [{ $eq: ["$status", "Cancelled"] }, 1, 0] },
+          },
+          avgPrice: { $avg: "$adminFinalPrice" },
+        },
+      },
+      {
+        $project: {
+          serviceType: "$_id",
+          total: 1,
+          completed: 1,
+          cancelled: 1,
+          avgPrice: { $round: ["$avgPrice", 0] },
+          completionRate: {
+            $cond: [
+              { $gt: ["$total", 0] },
+              { $multiply: [{ $divide: ["$completed", "$total"] }, 100] },
+              0,
+            ],
+          },
+        },
+      },
+      { $sort: { total: -1 } },
+    ]),
+  ]);
 
   return {
     dateRange: { from, to },
@@ -516,6 +1199,10 @@ export async function crmGetServiceRequestTrends(from: Date, to: Date) {
     topCities: byCity,
     topBrands,
     dailyVolume,
+    recurringIssues,
+    topProblems,
+    cancellationReasons,
+    completionRateByServiceType,
   };
 }
 
@@ -966,6 +1653,86 @@ export async function crmGetCustomerWalletTransactions(
 }
 
 /**
+ * Full service request history for a single customer with filters and pagination.
+ * Distinct from crmGetCustomerInteractions (which returns a summary timeline).
+ */
+export async function crmGetCustomerServiceHistory(
+  customerId: string,
+  filter: {
+    status?: string;
+    serviceType?: string;
+    from?: Date;
+    to?: Date;
+    page?: number;
+    limit?: number;
+  } = {},
+) {
+  const page = filter.page ?? 1;
+  const limit = filter.limit ?? 20;
+  const skip = (page - 1) * limit;
+
+  const query: Record<string, unknown> = { customerId };
+  if (filter.status) query.status = filter.status;
+  if (filter.serviceType) query.serviceType = filter.serviceType;
+  if (filter.from || filter.to) {
+    query.createdAt = {
+      ...(filter.from ? { $gte: filter.from } : {}),
+      ...(filter.to ? { $lte: filter.to } : {}),
+    };
+  }
+
+  const [requests, total] = await Promise.all([
+    mongoose
+      .model("ServiceRequest")
+      .find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .select(
+        "request_id status serviceType brand model city createdAt completedAt adminFinalPrice adminPricingBreakdown vendorServiceCharge paymentStatus assignedVendor priority",
+      )
+      .populate("assignedVendor", "businessName")
+      .lean(),
+    mongoose.model("ServiceRequest").countDocuments(query),
+  ]);
+
+  return { requests, total, page, limit };
+}
+
+/**
+ * Payment transaction history for a single customer with pagination.
+ */
+export async function crmGetCustomerPaymentHistory(
+  customerId: string,
+  filter: {
+    status?: string;
+    page?: number;
+    limit?: number;
+  } = {},
+) {
+  const page = filter.page ?? 1;
+  const limit = filter.limit ?? 20;
+  const skip = (page - 1) * limit;
+
+  const query: Record<string, unknown> = { customerId };
+  if (filter.status) query.status = filter.status;
+
+  const [payments, total] = await Promise.all([
+    mongoose
+      .model("PaymentTransaction")
+      .find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate("serviceRequestId", "request_id brand model serviceType")
+      .lean(),
+    mongoose.model("PaymentTransaction").countDocuments(query),
+  ]);
+
+  return { payments, total, page, limit };
+}
+
+/**
  * Failed / pending payment overview for the platform.
  */
 export async function crmGetFailedPayments(page = 1, limit = 20) {
@@ -1040,6 +1807,7 @@ export async function crmCreateCampaign(
     targetSegment: CampaignTargetSegment;
     targetRegion?: string;
     targetUserIds?: string[];
+    targetCities?: string[];
     content: { subject?: string; body: string; callToAction?: string };
     scheduledAt?: Date;
   },
@@ -1055,7 +1823,8 @@ export async function crmCreateCampaign(
     ...data,
     createdBy: new mongoose.Types.ObjectId(createdBy),
     status: data.scheduledAt ? "scheduled" : "draft",
-    approvalStatus: "pending",
+    // CRM Managers have authority to send campaigns — no separate admin approval needed.
+    approvalStatus: "approved",
     stats: {
       sent: 0,
       delivered: 0,
@@ -1075,6 +1844,7 @@ export async function crmUpdateCampaign(
     title: string;
     description: string;
     scheduledAt: Date;
+    targetCities: string[];
     content: { subject?: string; body?: string; callToAction?: string };
     status: "draft" | "scheduled" | "paused" | "cancelled";
   }>,
@@ -1094,9 +1864,196 @@ export async function crmUpdateCampaign(
   return campaign;
 }
 
+type CampaignDoc = {
+  _id: unknown;
+  title: string;
+  type: string;
+  status: string;
+  targetSegment: string;
+  targetRegion?: string;
+  targetUserIds?: string[];
+  targetCities?: string[];
+  content: { subject?: string; body: string; callToAction?: string };
+};
+
+/**
+ * Resolves a campaign's target to user IDs and delivers it via the main-app
+ * bridge (POST /internal/deliver-campaign). Runs as a background task — the
+ * caller should NOT await this; it updates campaign.stats.sent/failed when done.
+ *
+ * When the message content contains {{variable}} tokens, delivers per-user with
+ * personalized content (name, city, deviceBrand, etc.) resolved from the DB.
+ * Plain content is delivered in batches of 1000 for maximum throughput.
+ */
+async function crmDeliverCampaign(campaign: CampaignDoc) {
+  try {
+    const { env } = await import("../../config/env.config");
+    if (!env.MAIN_APP_URL || !env.INTERNAL_API_SECRET) {
+      console.warn(
+        "[crmDeliverCampaign] MAIN_APP_URL or INTERNAL_API_SECRET not set — skipping delivery",
+      );
+      return;
+    }
+
+    // ── Step 1: Resolve target users ─────────────────────────────────────────
+
+    let userIds: string[] = [];
+
+    if (
+      campaign.targetSegment === "custom" &&
+      Array.isArray(campaign.targetUserIds) &&
+      campaign.targetUserIds.length > 0
+    ) {
+      userIds = campaign.targetUserIds.map(String);
+    } else {
+      userIds = await crmGetSegmentUserIds(campaign.targetSegment);
+
+      if (campaign.targetSegment === "regional" && campaign.targetRegion) {
+        const regionUsers = await User.find({
+          _id: { $in: userIds },
+          region: campaign.targetRegion,
+        })
+          .select("_id")
+          .lean();
+        userIds = regionUsers.map((u: { _id: unknown }) => String(u._id));
+      }
+    }
+
+    // ── Step 2: Apply city filter (if set) ───────────────────────────────────
+
+    if (
+      Array.isArray(campaign.targetCities) &&
+      campaign.targetCities.length > 0
+    ) {
+      const SR = mongoose.model("ServiceRequest");
+      const cityPattern = campaign.targetCities.map((c) => new RegExp(`^${c}$`, "i"));
+      const cityUserIds = await SR.distinct("customerId", {
+        customerId: { $in: userIds },
+        city: { $in: cityPattern },
+      });
+      userIds = cityUserIds.map(String);
+    }
+
+    if (userIds.length === 0) {
+      console.log(
+        `[crmDeliverCampaign] campaign=${campaign._id} — no users in segment, nothing to deliver`,
+      );
+      return;
+    }
+
+    // ── Step 3: Deliver (personalized per-user or batched) ───────────────────
+
+    const BATCH = 1000;
+    let totalSent = 0;
+    let totalFailed = 0;
+    const hasVars = containsVariables(campaign.content);
+
+    if (hasVars) {
+      // Per-user delivery: resolve tokens then call bridge once per user
+      const PERSONAL_BATCH = 50;
+      for (let i = 0; i < userIds.length; i += PERSONAL_BATCH) {
+        const batch = userIds.slice(i, i + PERSONAL_BATCH);
+        await Promise.all(
+          batch.map(async (uid) => {
+            const resolvedContent = await resolvePersonalizedContent(
+              uid,
+              campaign.content,
+            );
+            try {
+              const response = await fetch(
+                `${env.MAIN_APP_URL}/internal/deliver-campaign`,
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "x-internal-secret": env.INTERNAL_API_SECRET!,
+                  },
+                  body: JSON.stringify({
+                    users: [uid],
+                    type: campaign.type,
+                    content: resolvedContent,
+                    campaignTitle: campaign.title,
+                    campaignId: String(campaign._id),
+                  }),
+                },
+              );
+              const json = (await response.json().catch(() => ({}))) as {
+                sent?: number;
+                failed?: number;
+              };
+              totalSent += json.sent ?? 0;
+              totalFailed += json.failed ?? 0;
+            } catch {
+              totalFailed += 1;
+            }
+          }),
+        );
+      }
+    } else {
+      // Batched delivery for plain (non-personalized) content
+      for (let i = 0; i < userIds.length; i += BATCH) {
+        const batch = userIds.slice(i, i + BATCH);
+        const response = await fetch(
+          `${env.MAIN_APP_URL}/internal/deliver-campaign`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-internal-secret": env.INTERNAL_API_SECRET!,
+            },
+            body: JSON.stringify({
+              users: batch,
+              type: campaign.type,
+              content: campaign.content,
+              campaignTitle: campaign.title,
+              campaignId: String(campaign._id),
+            }),
+          },
+        );
+
+        if (!response.ok) {
+          const text = await response.text().catch(() => "");
+          console.error(
+            `[crmDeliverCampaign] bridge error ${response.status}: ${text}`,
+          );
+          totalFailed += batch.length;
+          continue;
+        }
+
+        const json = (await response.json()) as {
+          sent?: number;
+          failed?: number;
+        };
+        totalSent += json.sent ?? 0;
+        totalFailed += json.failed ?? 0;
+      }
+    }
+
+    // Update campaign stats
+    await Campaign.findByIdAndUpdate(campaign._id, {
+      $inc: { "stats.sent": totalSent, "stats.failed": totalFailed },
+      status: "completed",
+      completedAt: new Date(),
+    });
+
+    console.log(
+      `[crmDeliverCampaign] campaign=${campaign._id} delivered — sent=${totalSent} failed=${totalFailed}`,
+    );
+  } catch (err: unknown) {
+    console.error(
+      "[crmDeliverCampaign] error:",
+      err instanceof Error ? err.message : err,
+    );
+    await Campaign.findByIdAndUpdate(campaign._id, {
+      status: "paused",
+    }).catch(() => {});
+  }
+}
+
 /**
  * Activate/schedule a campaign (moves from draft to scheduled/active).
- * Requires campaign to be approved if not admin.
+ * For immediate campaigns (no scheduledAt), triggers delivery in the background
+ * via the main-app bridge so the API response is fast.
  */
 export async function crmActivateCampaign(campaignId: string, adminId: string) {
   const campaign = await Campaign.findById(campaignId);
@@ -1112,11 +2069,180 @@ export async function crmActivateCampaign(campaignId: string, adminId: string) {
   if (campaign.status === "active") campaign.sentAt = new Date();
   await campaign.save();
 
+  // Fire delivery in background — do NOT await so the API response is immediate.
+  // Delivery updates stats.sent/failed and sets status → "completed" when done.
+  if (campaign.status === "active") {
+    crmDeliverCampaign(campaign.toObject()).catch((err) =>
+      console.error("[crmActivateCampaign] background delivery error:", err),
+    );
+  }
+
+  return campaign;
+}
+
+export async function crmDeleteCampaign(campaignId: string) {
+  const campaign = await Campaign.findById(campaignId);
+  if (!campaign) throw ApiError.notFound("Campaign not found");
+  if (!["draft", "cancelled", "completed", "paused"].includes(campaign.status)) {
+    throw ApiError.badRequest(
+      `Cannot delete an active campaign. Cancel or pause it first.`,
+    );
+  }
+  await campaign.deleteOne();
+}
+
+export async function crmRestartCampaign(campaignId: string) {
+  const campaign = await Campaign.findById(campaignId);
+  if (!campaign) throw ApiError.notFound("Campaign not found");
+  if (!["completed", "paused", "cancelled"].includes(campaign.status)) {
+    throw ApiError.badRequest(
+      `Cannot restart a ${campaign.status} campaign.`,
+    );
+  }
+  campaign.status = "draft";
+  campaign.sentAt = undefined as unknown as Date;
+  campaign.completedAt = undefined as unknown as Date;
+  campaign.stats = {
+    sent: 0,
+    delivered: 0,
+    opened: 0,
+    clicked: 0,
+    converted: 0,
+    failed: 0,
+  };
+  await campaign.save();
   return campaign;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// §9  LOYALTY & RETENTION
+// §8  CAMPAIGN TEMPLATES
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function crmListCampaignTemplates(channel?: string) {
+  const query: Record<string, unknown> = { isActive: true };
+  if (channel) query.channel = channel;
+  return CampaignTemplate.find(query).sort({ createdAt: -1 }).lean();
+}
+
+export async function crmCreateCampaignTemplate(
+  data: {
+    name: string;
+    description?: string;
+    channel: string;
+    subject?: string;
+    body: string;
+    callToAction?: string;
+  },
+  createdBy: string,
+) {
+  return CampaignTemplate.create({
+    ...data,
+    createdBy: new mongoose.Types.ObjectId(createdBy),
+  });
+}
+
+export async function crmUpdateCampaignTemplate(
+  templateId: string,
+  updates: Partial<{
+    name: string;
+    description: string;
+    subject: string;
+    body: string;
+    callToAction: string;
+    isActive: boolean;
+  }>,
+  updatedBy: string,
+) {
+  const template = await CampaignTemplate.findById(templateId);
+  if (!template) throw ApiError.notFound("Template not found");
+  Object.assign(template, updates, {
+    updatedBy: new mongoose.Types.ObjectId(updatedBy),
+  });
+  await template.save();
+  return template;
+}
+
+export async function crmDeleteCampaignTemplate(templateId: string) {
+  const template = await CampaignTemplate.findById(templateId);
+  if (!template) throw ApiError.notFound("Template not found");
+  await template.deleteOne();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §9  AUTOMATED FOLLOW-UP RULES
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function crmListFollowUpRules() {
+  return FollowUpRule.find().sort({ createdAt: -1 }).lean();
+}
+
+export async function crmCreateFollowUpRule(
+  data: {
+    name: string;
+    description?: string;
+    trigger: string;
+    delayHours: number;
+    daysBeforeExpiry?: number;
+    channel: string;
+    targetCities?: string[];
+    content: { subject?: string; body: string; callToAction?: string };
+  },
+  createdBy: string,
+) {
+  return FollowUpRule.create({
+    ...data,
+    createdBy: new mongoose.Types.ObjectId(createdBy),
+  });
+}
+
+export async function crmUpdateFollowUpRule(
+  ruleId: string,
+  updates: Partial<{
+    name: string;
+    description: string;
+    trigger: string;
+    delayHours: number;
+    daysBeforeExpiry: number;
+    channel: string;
+    targetCities: string[];
+    content: { subject?: string; body: string; callToAction?: string };
+    isActive: boolean;
+  }>,
+  updatedBy: string,
+) {
+  const rule = await FollowUpRule.findById(ruleId);
+  if (!rule) throw ApiError.notFound("Follow-up rule not found");
+  Object.assign(rule, updates, {
+    updatedBy: new mongoose.Types.ObjectId(updatedBy),
+  });
+  await rule.save();
+  return rule;
+}
+
+export async function crmDeleteFollowUpRule(ruleId: string) {
+  const rule = await FollowUpRule.findById(ruleId);
+  if (!rule) throw ApiError.notFound("Follow-up rule not found");
+  await rule.deleteOne();
+}
+
+export async function crmToggleFollowUpRule(ruleId: string) {
+  const rule = await FollowUpRule.findById(ruleId);
+  if (!rule) throw ApiError.notFound("Follow-up rule not found");
+  rule.isActive = !rule.isActive;
+  await rule.save();
+  return rule;
+}
+
+export async function crmRunFollowUpRule(ruleId: string) {
+  const rule = await FollowUpRule.findById(ruleId).lean();
+  if (!rule) throw ApiError.notFound("Follow-up rule not found");
+  const result = await runRule(rule);
+  const updated = await FollowUpRule.findById(ruleId).lean();
+  return { rule: updated, result };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §10  LOYALTY & RETENTION
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function crmGetHighValueCustomers(limit = 20) {
@@ -1281,6 +2407,8 @@ export async function crmGetLoyaltyOverview() {
 export async function crmListReviews(filter: {
   minRating?: number;
   maxRating?: number;
+  reviewStatus?: string;
+  hasResponse?: boolean;
   page?: number;
   limit?: number;
 }) {
@@ -1296,6 +2424,9 @@ export async function crmListReviews(filter: {
     if (filter.maxRating !== undefined)
       (query.rating as Record<string, unknown>).$lte = filter.maxRating;
   }
+  if (filter.reviewStatus) query.reviewStatus = filter.reviewStatus;
+  if (filter.hasResponse === true) query["crmResponse.text"] = { $exists: true, $ne: "" };
+  if (filter.hasResponse === false) query["crmResponse.text"] = { $exists: false };
 
   const [reviews, total] = await Promise.all([
     mongoose
@@ -1307,11 +2438,72 @@ export async function crmListReviews(filter: {
       .populate("customerId", "username email")
       .populate("vendorId", "pocInfo.fullName")
       .populate("serviceRequestId", "request_id brand model")
+      .populate("assignedTo", "username email")
       .lean(),
     mongoose.model("Review").countDocuments(query),
   ]);
 
   return { reviews, total, page, limit };
+}
+
+export async function crmRespondToReview(
+  reviewId: string,
+  text: string,
+  adminId: string,
+) {
+  const review = await mongoose.model("Review").findById(reviewId);
+  if (!review) throw ApiError.notFound("Review not found");
+
+  review.set("crmResponse", {
+    text,
+    respondedBy: new mongoose.Types.ObjectId(adminId),
+    respondedAt: new Date(),
+  });
+  review.set("reviewStatus", "responded");
+  await review.save();
+  return review;
+}
+
+export async function crmAssignReview(
+  reviewId: string,
+  assignedTo: string,
+  adminId: string,
+) {
+  const review = await mongoose.model("Review").findById(reviewId);
+  if (!review) throw ApiError.notFound("Review not found");
+
+  review.set("assignedTo", new mongoose.Types.ObjectId(assignedTo));
+  review.set("reviewStatus", "assigned");
+  review.set("_assignedBy", new mongoose.Types.ObjectId(adminId));
+  await review.save();
+  return review;
+}
+
+export async function crmUpdateReviewStatus(
+  reviewId: string,
+  status: "pending" | "assigned" | "responded" | "resolved" | "flagged",
+) {
+  const review = await mongoose.model("Review").findById(reviewId);
+  if (!review) throw ApiError.notFound("Review not found");
+
+  review.set("reviewStatus", status);
+  if (status === "flagged") review.set("flagged", true);
+  if (status !== "flagged") review.set("flagged", false);
+  await review.save();
+  return review;
+}
+
+export async function crmGetTeamMembers() {
+  return User.find({
+    $or: [
+      { roles: { $in: ["crm_manager"] } },
+      { role: { $in: ["admin"] } },
+    ],
+    isActive: true,
+  })
+    .select("_id username email roles role")
+    .sort({ username: 1 })
+    .lean();
 }
 
 export async function crmGetReviewAnalytics() {

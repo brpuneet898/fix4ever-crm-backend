@@ -23,6 +23,7 @@ import {
   walletAdjustController,
   customerServiceHistoryController,
   customerWalletHistoryController,
+  customerPaymentHistoryController,
   cancelSubscriptionController,
   assignDiscountController,
 } from "../controllers/adminCustomer.controller";
@@ -173,6 +174,11 @@ export async function adminRoutes(app: FastifyInstance) {
     "/customers/:customerId/discount",
     { preHandler: [requirePermission(PERMISSIONS.CUSTOMERS_DISCOUNT_ASSIGN)] },
     r(assignDiscountController),
+  );
+  app.get(
+    "/customers/:customerId/payments",
+    { preHandler: [requirePermission(PERMISSIONS.CUSTOMERS_PAYMENTS_VIEW)] },
+    r(customerPaymentHistoryController),
   );
 
   // ═══════════════════════════════════════════════════════════════════════════

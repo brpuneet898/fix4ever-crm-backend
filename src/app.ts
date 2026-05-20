@@ -6,7 +6,8 @@ import fastifyHelmet from "@fastify/helmet";
 import fastifyRateLimit from "@fastify/rate-limit";
 import { env } from "./config/env.config";
 import { errorHandler } from "./shared/errors/errorHandler";
-import { apiV1Routes } from "./api/v1/routes";
+// Canonical routes path — api/v1/routes.ts remains for backward compatibility
+import { apiV1Routes } from "./routes";
 import { registerRequestContext } from "./shared/middleware/requestContext.middleware";
 
 export async function buildApp() {

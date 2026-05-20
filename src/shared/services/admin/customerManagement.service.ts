@@ -141,6 +141,29 @@ export async function getCustomerWalletHistory(
   return getWalletHistory(customerId, page, limit);
 }
 
+export async function getCustomerPaymentHistory(
+  customerId: string,
+  page = 1,
+  limit = 20,
+  status?: string,
+) {
+  const skip = (page - 1) * limit;
+  const query: Record<string, unknown> = { customerId };
+  if (status) query.status = status;
+  const [payments, total] = await Promise.all([
+    mongoose
+      .model("PaymentTransaction")
+      .find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate("serviceRequestId", "request_id brand model serviceType")
+      .lean(),
+    mongoose.model("PaymentTransaction").countDocuments(query),
+  ]);
+  return { payments, total };
+}
+
 export async function assignDiscountToCustomer(
   adminId: string,
   customerId: string,

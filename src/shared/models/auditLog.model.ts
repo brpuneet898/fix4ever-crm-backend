@@ -40,8 +40,13 @@ export type AuditAction =
   | "CREATE_CAMPAIGN"
   | "UPDATE_CAMPAIGN"
   | "ACTIVATE_CAMPAIGN"
+  | "DELETE_CAMPAIGN"
+  | "RESTART_CAMPAIGN"
   | "CAMPAIGN_APPROVE"
   | "CAMPAIGN_REJECT"
+  | "CREATE_TEMPLATE"
+  | "UPDATE_TEMPLATE"
+  | "DELETE_TEMPLATE"
   | "TAG";
 
 export interface IAuditLog {
@@ -96,6 +101,32 @@ const auditLogSchema = new Schema<IAuditLogDocument>(
         "COMPENSATE",
         "CONFIG_CHANGE",
         "SYSTEM_TOGGLE",
+        "CREATE_CAMPAIGN",
+        "UPDATE_CAMPAIGN",
+        "ACTIVATE_CAMPAIGN",
+        "DELETE_CAMPAIGN",
+        "RESTART_CAMPAIGN",
+        "CAMPAIGN_APPROVE",
+        "CAMPAIGN_REJECT",
+        "CREATE_TEMPLATE",
+        "UPDATE_TEMPLATE",
+        "DELETE_TEMPLATE",
+        "BROADCAST_NOTIFICATION",
+        "ASSIGN_SR",
+        "REASSIGN_SR",
+        "CANCEL_SR",
+        "ESCALATE_SR",
+        "TAG_SR",
+        "SUBSCRIPTION_CANCEL",
+        "SUBSCRIPTION_PAUSE",
+        "SUBSCRIPTION_REACTIVATE",
+        "WALLET_ADJUST",
+        "PAYOUT_APPROVE",
+        "PERMISSION_OVERRIDE",
+        "ROLE_ASSIGN",
+        "ROLE_REMOVE",
+        "COMPENSATE",
+        "TAG",
       ],
     },
     module: { type: String, required: true, index: true },

@@ -6,6 +6,7 @@ import {
   adjustCustomerWallet,
   getCustomerServiceHistory,
   getCustomerWalletHistory,
+  getCustomerPaymentHistory,
   cancelCustomerSubscription,
   assignDiscountToCustomer,
   blockUser,
@@ -142,6 +143,34 @@ export async function customerWalletHistoryController(
 ) {
   const data = await getCustomerWalletHistory(req.params.customerId);
   return reply.send(successResponse(data, "Wallet history fetched"));
+}
+
+export async function customerPaymentHistoryController(
+  req: FastifyRequest<CustomerParams>,
+  reply: FastifyReply,
+) {
+  const { page, limit, status } = z
+    .object({
+      page: z.coerce.number().min(1).default(1),
+      limit: z.coerce.number().min(1).max(100).default(20),
+      status: z.string().optional(),
+    })
+    .parse(req.query);
+  const result = await getCustomerPaymentHistory(
+    req.params.customerId,
+    page,
+    limit,
+    status,
+  );
+  return reply.send(
+    paginatedResponse(
+      result.payments,
+      result.total,
+      page,
+      limit,
+      "Payment history fetched",
+    ),
+  );
 }
 
 export async function cancelSubscriptionController(

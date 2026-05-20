@@ -68,11 +68,9 @@
  */
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
-import {
-  requirePermission,
-  requireRole,
-} from "../../shared/middleware/permission.middleware";
+import { requireRole } from "../../shared/middleware/permission.middleware";
 import { authMiddleware } from "../../shared/middleware/auth.middleware";
+import { policyMiddleware } from "../../policies/policy.middleware";
 import { PERMISSIONS, ROLES } from "../../access";
 import {
   successResponse,
@@ -88,6 +86,8 @@ import {
   crmBlockCustomer,
   crmUnblockCustomer,
   crmGetCustomerInteractions,
+  crmGetCustomerServiceHistory,
+  crmGetCustomerPaymentHistory,
   crmManageSubscription,
   crmGetCustomerSubscriptions,
   crmGetCustomerWalletTransactions,
@@ -96,6 +96,7 @@ import {
   crmGetServiceRequestDetail,
   crmEscalateServiceRequest,
   crmTagServiceRequest,
+  crmUpdateServiceRequest,
   crmGetServiceRequestTrends,
   crmGetTechnicianPerformance,
   // §4 Analytics
@@ -112,13 +113,35 @@ import {
   crmCreateCampaign,
   crmUpdateCampaign,
   crmActivateCampaign,
-  // §9 Loyalty
+  crmDeleteCampaign,
+  crmRestartCampaign,
+  // §8 Campaign Templates
+  crmListCampaignTemplates,
+  crmCreateCampaignTemplate,
+  crmUpdateCampaignTemplate,
+  crmDeleteCampaignTemplate,
+  // §9 Follow-up Rules
+  crmListFollowUpRules,
+  crmCreateFollowUpRule,
+  crmUpdateFollowUpRule,
+  crmDeleteFollowUpRule,
+  crmToggleFollowUpRule,
+  crmRunFollowUpRule,
+  // §10 Loyalty
   crmGetHighValueCustomers,
   crmGetChurnAnalysis,
   crmGetLoyaltyOverview,
   // §3 Reviews
   crmListReviews,
   crmGetReviewAnalytics,
+  crmRespondToReview,
+  crmAssignReview,
+  crmUpdateReviewStatus,
+  crmGetTeamMembers,
+  // §1 Segment overview
+  crmGetSegmentOverview,
+  // §3 Segment notification delivery (main-app bridge)
+  crmDeliverNotificationToSegment,
 } from "../../shared/services/crm.service";
 import {
   listTickets,
@@ -130,6 +153,14 @@ import {
   getNotificationStats,
 } from "../../shared/services/admin";
 import { adjustWalletBalance } from "../../shared/services/wallet.service";
+
+/**
+ * PBAC helper: creates a policyMiddleware with resource auto-derived from the
+ * action string (e.g. "customers.read" → resource "customers").
+ * Used by all CRM endpoints as the DB-backed enforcement layer.
+ */
+const crmPolicy = (action: string) =>
+  policyMiddleware({ action, resource: action.split(".")[0] });
 
 const dateRangeSchema = z.object({
   from: z
@@ -162,7 +193,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.get(
     "/customers",
-    { preHandler: [requirePermission(PERMISSIONS.CUSTOMERS_READ)] },
+    { preHandler: [crmPolicy(PERMISSIONS.CUSTOMERS_READ)] },
     async (req, reply) => {
       const filter = z
         .object({
@@ -192,7 +223,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** Pre-built customer segments */
   app.get(
     "/customers/segments/:segment",
-    { preHandler: [requirePermission(PERMISSIONS.CUSTOMERS_SEGMENT)] },
+    { preHandler: [crmPolicy(PERMISSIONS.CUSTOMERS_SEGMENT)] },
     async (req: any, reply) => {
       const { page, limit } = z
         .object({
@@ -216,7 +247,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** Full customer profile with wallet, subscription, recent SRs */
   app.get(
     "/customers/:customerId",
-    { preHandler: [requirePermission(PERMISSIONS.CUSTOMERS_READ)] },
+    { preHandler: [crmPolicy(PERMISSIONS.CUSTOMERS_READ)] },
     async (req: any, reply) => {
       const data = await crmGetCustomerDetail(req.params.customerId);
       return reply.send(successResponse(data, "Customer detail fetched"));
@@ -226,7 +257,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** Update customer mutable fields (username, phone, avatar) */
   app.patch(
     "/customers/:customerId",
-    { preHandler: [requirePermission(PERMISSIONS.CUSTOMERS_UPDATE)] },
+    { preHandler: [crmPolicy(PERMISSIONS.CUSTOMERS_UPDATE)] },
     async (req: any, reply) => {
       const updates = z
         .object({
@@ -252,7 +283,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** Block a customer (isActive = false) */
   app.patch(
     "/customers/:customerId/block",
-    { preHandler: [requirePermission(PERMISSIONS.CUSTOMERS_BLOCK)] },
+    { preHandler: [crmPolicy(PERMISSIONS.CUSTOMERS_BLOCK)] },
     async (req: any, reply) => {
       const { reason } = z
         .object({ reason: z.string().min(5, "Provide a reason (min 5 chars)") })
@@ -274,7 +305,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** Reactivate a blocked customer */
   app.patch(
     "/customers/:customerId/unblock",
-    { preHandler: [requirePermission(PERMISSIONS.CUSTOMERS_BLOCK)] },
+    { preHandler: [crmPolicy(PERMISSIONS.CUSTOMERS_BLOCK)] },
     async (req: any, reply) => {
       const result = await crmUnblockCustomer(
         req.params.customerId,
@@ -291,7 +322,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** Customer interaction history (service requests timeline) */
   app.get(
     "/customers/:customerId/interactions",
-    { preHandler: [requirePermission(PERMISSIONS.CUSTOMERS_READ)] },
+    { preHandler: [crmPolicy(PERMISSIONS.CUSTOMERS_READ)] },
     async (req: any, reply) => {
       const { page, limit } = z
         .object({
@@ -319,7 +350,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** Customer subscription history */
   app.get(
     "/customers/:customerId/subscription",
-    { preHandler: [requirePermission(PERMISSIONS.SUBSCRIPTIONS_READ)] },
+    { preHandler: [crmPolicy(PERMISSIONS.SUBSCRIPTIONS_READ)] },
     async (req: any, reply) => {
       const data = await crmGetCustomerSubscriptions(req.params.customerId);
       return reply.send(successResponse(data, "Customer subscriptions"));
@@ -329,7 +360,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** Cancel / pause / reactivate subscription */
   app.patch(
     "/customers/:customerId/subscription",
-    { preHandler: [requirePermission(PERMISSIONS.SUBSCRIPTIONS_CANCEL)] },
+    { preHandler: [crmPolicy(PERMISSIONS.SUBSCRIPTIONS_CANCEL)] },
     async (req: any, reply) => {
       const { action, reason } = z
         .object({
@@ -360,7 +391,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** Customer wallet transactions (paginated, covers archive too) */
   app.get(
     "/customers/:customerId/wallet",
-    { preHandler: [requirePermission(PERMISSIONS.WALLET_VIEW)] },
+    { preHandler: [crmPolicy(PERMISSIONS.WALLET_VIEW)] },
     async (req: any, reply) => {
       const { page, limit } = z
         .object({
@@ -385,13 +416,80 @@ export async function crmRoutes(app: FastifyInstance) {
     },
   );
 
+  /** Full paginated service request history for a customer with filters */
+  app.get(
+    "/customers/:customerId/service-requests",
+    { preHandler: [crmPolicy(PERMISSIONS.CUSTOMERS_REPAIR_HISTORY_VIEW)] },
+    async (req: any, reply) => {
+      const filter = z
+        .object({
+          status: z.string().optional(),
+          serviceType: z.string().optional(),
+          from: z
+            .string()
+            .datetime()
+            .optional()
+            .transform((v) => (v ? new Date(v) : undefined)),
+          to: z
+            .string()
+            .datetime()
+            .optional()
+            .transform((v) => (v ? new Date(v) : undefined)),
+          page: z.coerce.number().default(1),
+          limit: z.coerce.number().max(100).default(20),
+        })
+        .parse(req.query);
+      const data = await crmGetCustomerServiceHistory(
+        req.params.customerId,
+        filter,
+      );
+      return reply.send(
+        paginatedResponse(
+          data.requests,
+          data.total,
+          data.page,
+          data.limit,
+          "Customer service history",
+        ),
+      );
+    },
+  );
+
+  /** Payment transaction history for a customer */
+  app.get(
+    "/customers/:customerId/payments",
+    { preHandler: [crmPolicy(PERMISSIONS.CUSTOMERS_PAYMENTS_VIEW)] },
+    async (req: any, reply) => {
+      const filter = z
+        .object({
+          status: z.string().optional(),
+          page: z.coerce.number().default(1),
+          limit: z.coerce.number().max(100).default(20),
+        })
+        .parse(req.query);
+      const data = await crmGetCustomerPaymentHistory(
+        req.params.customerId,
+        filter,
+      );
+      return reply.send(
+        paginatedResponse(
+          data.payments,
+          data.total,
+          data.page,
+          data.limit,
+          "Customer payment history",
+        ),
+      );
+    },
+  );
+
   // ═══════════════════════════════════════════════════════════════════════════
   // §2  SERVICE REQUEST OVERSIGHT
   // ═══════════════════════════════════════════════════════════════════════════
 
   app.get(
     "/service-requests",
-    { preHandler: [requirePermission(PERMISSIONS.SERVICE_REQUESTS_READ)] },
+    { preHandler: [crmPolicy(PERMISSIONS.SERVICE_REQUESTS_READ)] },
     async (req, reply) => {
       const filter = z
         .object({
@@ -429,7 +527,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** SR trend analysis: volume, status, city, brand breakdowns */
   app.get(
     "/service-requests/trends",
-    { preHandler: [requirePermission(PERMISSIONS.SERVICE_REQUESTS_READ)] },
+    { preHandler: [crmPolicy(PERMISSIONS.SERVICE_REQUESTS_READ)] },
     async (req, reply) => {
       const { from, to } = dateRangeSchema.parse(req.query);
       const data = await crmGetServiceRequestTrends(from, to);
@@ -440,7 +538,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** Full detail for a single SR */
   app.get(
     "/service-requests/:requestId",
-    { preHandler: [requirePermission(PERMISSIONS.SERVICE_REQUESTS_READ)] },
+    { preHandler: [crmPolicy(PERMISSIONS.SERVICE_REQUESTS_READ)] },
     async (req: any, reply) => {
       const data = await crmGetServiceRequestDetail(req.params.requestId);
       return reply.send(successResponse(data, "Service request detail"));
@@ -450,7 +548,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** Escalate a service request */
   app.patch(
     "/service-requests/:requestId/escalate",
-    { preHandler: [requirePermission(PERMISSIONS.SERVICE_REQUESTS_ESCALATE)] },
+    { preHandler: [crmPolicy(PERMISSIONS.SERVICE_REQUESTS_ESCALATE)] },
     async (req: any, reply) => {
       const { note } = z.object({ note: z.string().min(5) }).parse(req.body);
       const sr = await crmEscalateServiceRequest(
@@ -470,7 +568,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** Tag a service request */
   app.patch(
     "/service-requests/:requestId/tag",
-    { preHandler: [requirePermission(PERMISSIONS.SERVICE_REQUESTS_TAG)] },
+    { preHandler: [crmPolicy(PERMISSIONS.SERVICE_REQUESTS_TAG)] },
     async (req: any, reply) => {
       const { tag } = z.object({ tag: z.string().min(1) }).parse(req.body);
       const sr = await crmTagServiceRequest(
@@ -487,34 +585,161 @@ export async function crmRoutes(app: FastifyInstance) {
     },
   );
 
+  /** Full-field CRM edit — all editable fields of a service request */
+  app.patch(
+    "/service-requests/:requestId",
+    { preHandler: [crmPolicy(PERMISSIONS.SERVICE_REQUESTS_UPDATE)] },
+    async (req: any, reply) => {
+      const bodySchema = z.object({
+        // Customer
+        userName: z.string().optional(),
+        userPhone: z.string().optional(),
+        beneficiaryName: z.string().optional(),
+        beneficiaryPhone: z.string().optional(),
+        requestType: z.enum(["self", "other"]).optional(),
+        // Location
+        address: z.string().optional(),
+        city: z.string().optional(),
+        location: z
+          .object({
+            address: z.string().optional(),
+            lat: z.number().optional(),
+            lng: z.number().optional(),
+          })
+          .optional(),
+        customerLocation: z
+          .object({
+            latitude: z.number().optional(),
+            longitude: z.number().optional(),
+          })
+          .optional(),
+        // Device
+        brand: z.string().optional(),
+        model: z.string().optional(),
+        deviceType: z.string().optional(),
+        deviceBrand: z.string().optional(),
+        deviceModel: z.string().optional(),
+        // Service
+        serviceType: z.enum(["pickup-drop", "visit-shop", "onsite"]).optional(),
+        status: z.string().optional(),
+        priority: z.enum(["low", "medium", "high", "urgent"]).optional(),
+        isUrgent: z.boolean().optional(),
+        // Problem
+        mainProblem: z
+          .object({ id: z.string(), title: z.string() })
+          .optional(),
+        subProblem: z
+          .object({ id: z.string(), title: z.string() })
+          .optional(),
+        relationalBehaviors: z.array(z.unknown()).optional(),
+        minPrice: z.number().optional(),
+        maxPrice: z.number().optional(),
+        level: z.string().optional(),
+        problemDescription: z.string().optional(),
+        // Scheduling
+        preferredDate: z.string().optional(),
+        preferredTime: z.string().optional(),
+        scheduledDate: z.string().optional(),
+        scheduledTime: z.string().optional(),
+        scheduledSlot: z.string().optional(),
+        // Pricing
+        adminFinalPrice: z.number().optional(),
+        adminPricingNotes: z.string().optional(),
+        adminComponentCharges: z.number().optional(),
+        adminComponentNotes: z.string().optional(),
+        // Assignment
+        assignedTechnician: z.string().optional(),
+        assignedVendor: z.string().optional(),
+        assignedCaptain: z.string().optional(),
+        // Notes
+        technicianNotes: z.string().optional(),
+        scheduleNotes: z.string().optional(),
+      });
+
+      const updates = bodySchema.parse(req.body);
+
+      if (Object.keys(updates).length === 0) {
+        return reply.status(400).send({ success: false, message: "No fields provided to update" });
+      }
+
+      const sr = await crmUpdateServiceRequest(
+        req.params.requestId,
+        updates,
+        req.admin!.userId,
+      );
+      await audit(req, "UPDATE_SR", "service_requests", {
+        targetId: req.params.requestId,
+        targetModel: "ServiceRequest",
+        metadata: { updatedFields: Object.keys(updates) },
+      });
+      return reply.send(successResponse(sr, "Service request updated"));
+    },
+  );
+
   // ═══════════════════════════════════════════════════════════════════════════
   // §3  COMMUNICATION & NOTIFICATIONS
   // ═══════════════════════════════════════════════════════════════════════════
 
   app.post(
     "/notifications/broadcast",
-    { preHandler: [requirePermission(PERMISSIONS.NOTIFICATIONS_BROADCAST)] },
+    { preHandler: [crmPolicy(PERMISSIONS.NOTIFICATIONS_BROADCAST)] },
     async (req, reply) => {
       const body = z
         .object({
-          title: z.string(),
-          message: z.string(),
-          type: z.string(),
+          title: z.string().min(1),
+          message: z.string().min(1),
+          type: z.string().optional(),
           targetRole: z.string().optional(),
           targetUsers: z.array(z.string()).optional(),
+          // Segment-based delivery — routes through main-app bridge for
+          // real-time Socket.IO push + correct notification type enum
+          targetSegment: z.string().optional(),
         })
         .parse(req.body);
-      const result = await broadcastNotification(body);
-      await audit(req, "BROADCAST_NOTIFICATION", "notifications", {
-        metadata: { ...body, sent: result.sent },
-      });
+
+      let result: { sent: number; failed?: number; total?: number };
+
+      if (body.targetSegment) {
+        // Segment path: resolve users via main-app bridge
+        result = await crmDeliverNotificationToSegment({
+          segment: body.targetSegment,
+          title: body.title,
+          message: body.message,
+        });
+        await audit(req, "BROADCAST_NOTIFICATION", "notifications", {
+          metadata: {
+            targetSegment: body.targetSegment,
+            title: body.title,
+            sent: result.sent,
+            failed: result.failed ?? 0,
+            total: result.total ?? 0,
+          },
+        });
+      } else {
+        // Legacy path: role or explicit user list via existing broadcastNotification
+        result = await broadcastNotification({
+          title: body.title,
+          message: body.message,
+          type: body.type ?? "promotional",
+          targetRole: body.targetRole,
+          targetUsers: body.targetUsers,
+        });
+        await audit(req, "BROADCAST_NOTIFICATION", "notifications", {
+          metadata: {
+            targetRole: body.targetRole,
+            targetUsers: body.targetUsers?.length ?? 0,
+            sent: result.sent,
+          },
+        });
+      }
+
       return reply.send(successResponse(result, "Broadcast sent"));
     },
   );
 
   app.get(
     "/notifications/stats",
-    { preHandler: [requirePermission(PERMISSIONS.NOTIFICATIONS_ANALYTICS)] },
+    { preHandler: [crmPolicy(PERMISSIONS.NOTIFICATIONS_ANALYTICS)] },
     async (_req, reply) => {
       const stats = await getNotificationStats();
       return reply.send(successResponse(stats, "Notification stats"));
@@ -527,7 +752,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.get(
     "/analytics/customers",
-    { preHandler: [requirePermission(PERMISSIONS.ANALYTICS_CUSTOMER)] },
+    { preHandler: [crmPolicy(PERMISSIONS.ANALYTICS_CUSTOMER)] },
     async (_req, reply) => {
       const data = await crmGetCustomerAnalytics();
       return reply.send(successResponse(data, "Customer analytics"));
@@ -536,7 +761,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.get(
     "/analytics/revenue",
-    { preHandler: [requirePermission(PERMISSIONS.ANALYTICS_REVENUE)] },
+    { preHandler: [crmPolicy(PERMISSIONS.ANALYTICS_REVENUE)] },
     async (req, reply) => {
       const { from, to } = dateRangeSchema.parse(req.query);
       const data = await crmGetRevenueAnalytics(from, to);
@@ -546,7 +771,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.get(
     "/analytics/subscriptions",
-    { preHandler: [requirePermission(PERMISSIONS.SUBSCRIPTIONS_ANALYTICS)] },
+    { preHandler: [crmPolicy(PERMISSIONS.SUBSCRIPTIONS_ANALYTICS)] },
     async (_req, reply) => {
       const data = await crmGetSubscriptionAnalytics();
       return reply.send(successResponse(data, "Subscription analytics"));
@@ -555,7 +780,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.get(
     "/analytics/conversions",
-    { preHandler: [requirePermission(PERMISSIONS.ANALYTICS_CUSTOMER)] },
+    { preHandler: [crmPolicy(PERMISSIONS.ANALYTICS_CUSTOMER)] },
     async (req, reply) => {
       const { from, to } = dateRangeSchema.parse(req.query);
       const data = await crmGetConversionAnalytics(from, to);
@@ -565,7 +790,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.get(
     "/analytics/high-value-customers",
-    { preHandler: [requirePermission(PERMISSIONS.LOYALTY_VIEW)] },
+    { preHandler: [crmPolicy(PERMISSIONS.LOYALTY_VIEW)] },
     async (req, reply) => {
       const { limit } = z
         .object({ limit: z.coerce.number().default(20) })
@@ -578,7 +803,7 @@ export async function crmRoutes(app: FastifyInstance) {
   /** Churn analysis: customers with no orders in N days */
   app.get(
     "/analytics/churn",
-    { preHandler: [requirePermission(PERMISSIONS.ANALYTICS_CUSTOMER)] },
+    { preHandler: [crmPolicy(PERMISSIONS.ANALYTICS_CUSTOMER)] },
     async (req, reply) => {
       const { inactiveDays, page, limit } = z
         .object({
@@ -606,7 +831,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.get(
     "/tickets",
-    { preHandler: [requirePermission(PERMISSIONS.TICKETS_READ)] },
+    { preHandler: [crmPolicy(PERMISSIONS.TICKETS_READ)] },
     async (req, reply) => {
       const filter = z
         .object({
@@ -631,7 +856,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.post(
     "/tickets",
-    { preHandler: [requirePermission(PERMISSIONS.TICKETS_CREATE)] },
+    { preHandler: [crmPolicy(PERMISSIONS.TICKETS_CREATE)] },
     async (req, reply) => {
       const body = z
         .object({
@@ -664,7 +889,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.patch(
     "/tickets/:ticketId/assign",
-    { preHandler: [requirePermission(PERMISSIONS.TICKETS_ASSIGN)] },
+    { preHandler: [crmPolicy(PERMISSIONS.TICKETS_ASSIGN)] },
     async (req: any, reply) => {
       const { assignedTo } = z
         .object({ assignedTo: z.string() })
@@ -676,7 +901,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.patch(
     "/tickets/:ticketId/resolve",
-    { preHandler: [requirePermission(PERMISSIONS.TICKETS_RESOLVE)] },
+    { preHandler: [crmPolicy(PERMISSIONS.TICKETS_RESOLVE)] },
     async (req: any, reply) => {
       const { resolutionNote } = z
         .object({ resolutionNote: z.string().min(10) })
@@ -692,7 +917,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.patch(
     "/tickets/:ticketId/escalate",
-    { preHandler: [requirePermission(PERMISSIONS.TICKETS_ESCALATE)] },
+    { preHandler: [crmPolicy(PERMISSIONS.TICKETS_ESCALATE)] },
     async (req: any, reply) => {
       const { escalatedTo, note } = z
         .object({ escalatedTo: z.string(), note: z.string().min(5) })
@@ -712,7 +937,7 @@ export async function crmRoutes(app: FastifyInstance) {
    */
   app.patch(
     "/tickets/:ticketId/compensate",
-    { preHandler: [requirePermission(PERMISSIONS.TICKETS_COMPENSATE)] },
+    { preHandler: [crmPolicy(PERMISSIONS.TICKETS_COMPENSATE)] },
     async (req: any, reply) => {
       const { customerId, amount, reason } = z
         .object({
@@ -747,13 +972,23 @@ export async function crmRoutes(app: FastifyInstance) {
     },
   );
 
+  // ── Segment overview — all segment counts in one call ─────────────────────
+  app.get(
+    "/analytics/segment-overview",
+    { preHandler: [crmPolicy(PERMISSIONS.CUSTOMERS_SEGMENT)] },
+    async (_req, reply) => {
+      const data = await crmGetSegmentOverview();
+      return reply.send(successResponse(data, "Segment overview"));
+    },
+  );
+
   // ═══════════════════════════════════════════════════════════════════════════
   // §6  WALLET & PAYMENTS OVERVIEW
   // ═══════════════════════════════════════════════════════════════════════════
 
   app.get(
     "/analytics/wallet",
-    { preHandler: [requirePermission(PERMISSIONS.WALLET_MONITOR)] },
+    { preHandler: [crmPolicy(PERMISSIONS.WALLET_MONITOR)] },
     async (_req, reply) => {
       const data = await crmGetWalletOverview();
       return reply.send(successResponse(data, "Wallet overview"));
@@ -762,7 +997,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.get(
     "/analytics/payments/failed",
-    { preHandler: [requirePermission(PERMISSIONS.WALLET_MONITOR)] },
+    { preHandler: [crmPolicy(PERMISSIONS.WALLET_MONITOR)] },
     async (req, reply) => {
       const { page, limit } = z
         .object({
@@ -789,7 +1024,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.get(
     "/campaigns",
-    { preHandler: [requirePermission(PERMISSIONS.CAMPAIGNS_READ)] },
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_READ)] },
     async (req, reply) => {
       const filter = z
         .object({
@@ -815,7 +1050,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.get(
     "/campaigns/:campaignId",
-    { preHandler: [requirePermission(PERMISSIONS.CAMPAIGNS_READ)] },
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_READ)] },
     async (req: any, reply) => {
       const data = await crmGetCampaignDetail(req.params.campaignId);
       return reply.send(successResponse(data, "Campaign detail"));
@@ -824,11 +1059,11 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.post(
     "/campaigns",
-    { preHandler: [requirePermission(PERMISSIONS.CAMPAIGNS_CREATE)] },
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_CREATE)] },
     async (req, reply) => {
       const body = z
         .object({
-          title: z.string().min(3).max(200),
+          title: z.string().min(1).max(200),
           description: z.string().optional(),
           type: z.enum(["email", "sms", "in_app", "push"]),
           targetSegment: z.enum([
@@ -844,7 +1079,7 @@ export async function crmRoutes(app: FastifyInstance) {
           targetUserIds: z.array(z.string()).optional(),
           content: z.object({
             subject: z.string().optional(),
-            body: z.string().min(10),
+            body: z.string().min(1),
             callToAction: z.string().optional(),
           }),
           scheduledAt: z
@@ -868,7 +1103,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.patch(
     "/campaigns/:campaignId",
-    { preHandler: [requirePermission(PERMISSIONS.CAMPAIGNS_MANAGE)] },
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_MANAGE)] },
     async (req: any, reply) => {
       const updates = z
         .object({
@@ -906,7 +1141,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.patch(
     "/campaigns/:campaignId/activate",
-    { preHandler: [requirePermission(PERMISSIONS.CAMPAIGNS_MANAGE)] },
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_MANAGE)] },
     async (req: any, reply) => {
       const campaign = await crmActivateCampaign(
         req.params.campaignId,
@@ -920,18 +1155,259 @@ export async function crmRoutes(app: FastifyInstance) {
     },
   );
 
+  app.delete(
+    "/campaigns/:campaignId",
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_DELETE)] },
+    async (req: any, reply) => {
+      await crmDeleteCampaign(req.params.campaignId);
+      await audit(req, "DELETE_CAMPAIGN", "campaigns", {
+        targetId: req.params.campaignId,
+        targetModel: "Campaign",
+      });
+      return reply.send(successResponse(null, "Campaign deleted"));
+    },
+  );
+
+  app.patch(
+    "/campaigns/:campaignId/restart",
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_MANAGE)] },
+    async (req: any, reply) => {
+      const campaign = await crmRestartCampaign(req.params.campaignId);
+      await audit(req, "RESTART_CAMPAIGN", "campaigns", {
+        targetId: req.params.campaignId,
+        targetModel: "Campaign",
+      });
+      return reply.send(successResponse(campaign, "Campaign restarted"));
+    },
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // §8  CAMPAIGN TEMPLATES
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  app.get(
+    "/campaign-templates",
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_READ)] },
+    async (req, reply) => {
+      const { channel } = z
+        .object({ channel: z.string().optional() })
+        .parse(req.query);
+      const templates = await crmListCampaignTemplates(channel);
+      return reply.send(successResponse(templates, "Templates fetched"));
+    },
+  );
+
+  app.post(
+    "/campaign-templates",
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_CREATE)] },
+    async (req, reply) => {
+      const body = z
+        .object({
+          name: z.string().min(1).max(100),
+          description: z.string().optional(),
+          channel: z.enum(["email", "sms", "in_app", "push"]),
+          subject: z.string().optional(),
+          body: z.string().min(1),
+          callToAction: z.string().optional(),
+        })
+        .parse(req.body);
+      const template = await crmCreateCampaignTemplate(body, req.admin!.userId);
+      await audit(req, "CREATE_TEMPLATE", "campaign-templates", {
+        targetId: String(template._id),
+        targetModel: "CampaignTemplate",
+        metadata: { name: template.name, channel: template.channel },
+      });
+      return reply.code(201).send(successResponse(template, "Template created"));
+    },
+  );
+
+  app.patch(
+    "/campaign-templates/:templateId",
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_MANAGE)] },
+    async (req: any, reply) => {
+      const updates = z
+        .object({
+          name: z.string().min(1).max(100).optional(),
+          description: z.string().optional(),
+          subject: z.string().optional(),
+          body: z.string().min(1).optional(),
+          callToAction: z.string().optional(),
+          isActive: z.boolean().optional(),
+        })
+        .parse(req.body);
+      const template = await crmUpdateCampaignTemplate(
+        req.params.templateId,
+        updates,
+        req.admin!.userId,
+      );
+      await audit(req, "UPDATE_TEMPLATE", "campaign-templates", {
+        targetId: req.params.templateId,
+        targetModel: "CampaignTemplate",
+      });
+      return reply.send(successResponse(template, "Template updated"));
+    },
+  );
+
+  app.delete(
+    "/campaign-templates/:templateId",
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_DELETE)] },
+    async (req: any, reply) => {
+      await crmDeleteCampaignTemplate(req.params.templateId);
+      await audit(req, "DELETE_TEMPLATE", "campaign-templates", {
+        targetId: req.params.templateId,
+        targetModel: "CampaignTemplate",
+      });
+      return reply.send(successResponse(null, "Template deleted"));
+    },
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // §9  AUTOMATED FOLLOW-UP RULES
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  app.get(
+    "/follow-up-rules",
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_READ)] },
+    async (_req, reply) => {
+      const rules = await crmListFollowUpRules();
+      return reply.send(successResponse(rules, "Follow-up rules fetched"));
+    },
+  );
+
+  app.post(
+    "/follow-up-rules",
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_CREATE)] },
+    async (req, reply) => {
+      const body = z
+        .object({
+          name: z.string().min(1).max(100),
+          description: z.string().optional(),
+          trigger: z.enum([
+            "service_completed",
+            "subscription_expiry",
+            "subscription_renewed",
+          ]),
+          delayHours: z.coerce.number().int().min(0).default(24),
+          daysBeforeExpiry: z.coerce.number().int().min(1).optional(),
+          channel: z.enum(["email", "sms", "in_app", "push"]),
+          content: z.object({
+            subject: z.string().optional(),
+            body: z.string().min(1),
+            callToAction: z.string().optional(),
+          }),
+        })
+        .parse(req.body);
+      const rule = await crmCreateFollowUpRule(body, req.admin!.userId);
+      await audit(req, "CREATE", "follow-up-rules", {
+        targetId: String(rule._id),
+        targetModel: "FollowUpRule",
+        metadata: { name: rule.name, trigger: rule.trigger },
+      });
+      return reply.code(201).send(successResponse(rule, "Follow-up rule created"));
+    },
+  );
+
+  app.patch(
+    "/follow-up-rules/:ruleId",
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_MANAGE)] },
+    async (req: any, reply) => {
+      const updates = z
+        .object({
+          name: z.string().min(1).max(100).optional(),
+          description: z.string().optional(),
+          trigger: z
+            .enum([
+              "service_completed",
+              "subscription_expiry",
+              "subscription_renewed",
+            ])
+            .optional(),
+          delayHours: z.coerce.number().int().min(0).optional(),
+          daysBeforeExpiry: z.coerce.number().int().min(1).optional(),
+          channel: z.enum(["email", "sms", "in_app", "push"]).optional(),
+          content: z
+            .object({
+              subject: z.string().optional(),
+              body: z.string().min(1).optional(),
+              callToAction: z.string().optional(),
+            })
+            .optional(),
+          isActive: z.boolean().optional(),
+        })
+        .parse(req.body);
+      const rule = await crmUpdateFollowUpRule(
+        req.params.ruleId,
+        updates,
+        req.admin!.userId,
+      );
+      await audit(req, "UPDATE", "follow-up-rules", {
+        targetId: req.params.ruleId,
+        targetModel: "FollowUpRule",
+      });
+      return reply.send(successResponse(rule, "Follow-up rule updated"));
+    },
+  );
+
+  app.delete(
+    "/follow-up-rules/:ruleId",
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_DELETE)] },
+    async (req: any, reply) => {
+      await crmDeleteFollowUpRule(req.params.ruleId);
+      await audit(req, "DELETE", "follow-up-rules", {
+        targetId: req.params.ruleId,
+        targetModel: "FollowUpRule",
+      });
+      return reply.send(successResponse(null, "Follow-up rule deleted"));
+    },
+  );
+
+  app.patch(
+    "/follow-up-rules/:ruleId/toggle",
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_MANAGE)] },
+    async (req: any, reply) => {
+      const rule = await crmToggleFollowUpRule(req.params.ruleId);
+      await audit(req, "UPDATE", "follow-up-rules", {
+        targetId: req.params.ruleId,
+        targetModel: "FollowUpRule",
+        metadata: { isActive: rule.isActive },
+      });
+      return reply.send(
+        successResponse(rule, `Rule ${rule.isActive ? "enabled" : "disabled"}`),
+      );
+    },
+  );
+
+  app.post(
+    "/follow-up-rules/:ruleId/run",
+    { preHandler: [crmPolicy(PERMISSIONS.CAMPAIGNS_MANAGE)] },
+    async (req: any, reply) => {
+      const result = await crmRunFollowUpRule(req.params.ruleId);
+      await audit(req, "UPDATE", "follow-up-rules", {
+        targetId: req.params.ruleId,
+        targetModel: "FollowUpRule",
+        metadata: { manualRun: true },
+      });
+      return reply.send(successResponse(result, "Rule executed"));
+    },
+  );
+
   // ═══════════════════════════════════════════════════════════════════════════
   // §8  REVIEWS MANAGEMENT (read + analytics)
   // ═══════════════════════════════════════════════════════════════════════════
 
   app.get(
     "/reviews",
-    { preHandler: [requirePermission(PERMISSIONS.REVIEWS_READ)] },
+    { preHandler: [crmPolicy(PERMISSIONS.REVIEWS_READ)] },
     async (req, reply) => {
       const filter = z
         .object({
           minRating: z.coerce.number().min(1).max(5).optional(),
           maxRating: z.coerce.number().min(1).max(5).optional(),
+          reviewStatus: z.string().optional(),
+          hasResponse: z
+            .enum(["true", "false"])
+            .optional()
+            .transform((v) => (v !== undefined ? v === "true" : undefined)),
           page: z.coerce.number().default(1),
           limit: z.coerce.number().default(20),
         })
@@ -951,10 +1427,66 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.get(
     "/reviews/analytics",
-    { preHandler: [requirePermission(PERMISSIONS.REVIEWS_ANALYTICS)] },
+    { preHandler: [crmPolicy(PERMISSIONS.REVIEWS_ANALYTICS)] },
     async (_req, reply) => {
       const data = await crmGetReviewAnalytics();
       return reply.send(successResponse(data, "Review analytics"));
+    },
+  );
+
+  app.post(
+    "/reviews/:id/respond",
+    { preHandler: [crmPolicy(PERMISSIONS.REVIEWS_RESPOND)] },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const { text } = z
+        .object({ text: z.string().min(1).max(1000) })
+        .parse(req.body);
+      const data = await crmRespondToReview(id, text, req.admin!.userId);
+      return reply.send(successResponse(data, "Response posted"));
+    },
+  );
+
+  app.post(
+    "/reviews/:id/assign",
+    { preHandler: [crmPolicy(PERMISSIONS.REVIEWS_MODERATE)] },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const { assignedTo } = z
+        .object({ assignedTo: z.string().min(1) })
+        .parse(req.body);
+      const data = await crmAssignReview(id, assignedTo, req.admin!.userId);
+      return reply.send(successResponse(data, "Review assigned"));
+    },
+  );
+
+  app.patch(
+    "/reviews/:id/status",
+    { preHandler: [crmPolicy(PERMISSIONS.REVIEWS_MODERATE)] },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const { status } = z
+        .object({
+          status: z.enum([
+            "pending",
+            "assigned",
+            "responded",
+            "resolved",
+            "flagged",
+          ]),
+        })
+        .parse(req.body);
+      const data = await crmUpdateReviewStatus(id, status);
+      return reply.send(successResponse(data, "Review status updated"));
+    },
+  );
+
+  app.get(
+    "/team-members",
+    { preHandler: [crmPolicy(PERMISSIONS.CUSTOMERS_READ)] },
+    async (_req, reply) => {
+      const data = await crmGetTeamMembers();
+      return reply.send(successResponse(data, "Team members fetched"));
     },
   );
 
@@ -964,7 +1496,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.get(
     "/loyalty",
-    { preHandler: [requirePermission(PERMISSIONS.LOYALTY_VIEW)] },
+    { preHandler: [crmPolicy(PERMISSIONS.LOYALTY_VIEW)] },
     async (_req, reply) => {
       const data = await crmGetLoyaltyOverview();
       return reply.send(successResponse(data, "Loyalty overview"));
@@ -977,7 +1509,7 @@ export async function crmRoutes(app: FastifyInstance) {
 
   app.get(
     "/technicians/performance",
-    { preHandler: [requirePermission(PERMISSIONS.ANALYTICS_TECHNICIAN)] },
+    { preHandler: [crmPolicy(PERMISSIONS.ANALYTICS_TECHNICIAN)] },
     async (req, reply) => {
       const { page, limit } = z
         .object({

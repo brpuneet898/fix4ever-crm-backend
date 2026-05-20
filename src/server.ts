@@ -1,3 +1,12 @@
+/**
+ * server.ts — Application entry point
+ *
+ * Bootstraps the Fastify app, connects to MongoDB, syncs Mongoose indexes,
+ * attaches Socket.IO, and begins listening for HTTP connections.
+ *
+ * This is the canonical server entry point.
+ * The original main.ts remains untouched for backward compatibility.
+ */
 import { buildApp } from "./app";
 import { env } from "./config/env.config";
 import {
@@ -5,31 +14,27 @@ import {
   disconnectMongo,
 } from "./infrastructure/database/mongo.connection";
 import { initSocketServer } from "./infrastructure/websocket/socket.server";
+import { startFollowUpJob, stopFollowUpJob } from "./jobs/followUp.job";
 import { FastifyInstance } from "fastify";
 
 let _app: FastifyInstance | null = null;
 
-/**
- * Sync Mongoose schema indexes with MongoDB on startup.
- *
- * Drops any indexes present in MongoDB that are NOT defined in the Mongoose
- * schema (e.g. orphaned `phone_1` unique index from old schema versions), and
- * creates any missing indexes defined in the schema.
- *
- * Safe to run on every startup — Mongoose checks existing indexes before
- * issuing CREATE / DROP operations.
- */
 async function syncIndexes() {
-  // Import models lazily to avoid circular-dependency issues at module load time
   const { User } = await import("./shared/models/user.model");
   const { Campaign } = await import("./shared/models/campaign/campaign.model");
-  const { ServiceRequest } =
-    await import("./shared/models/serviceRequest/serviceRequest.model");
+  const { ServiceRequest } = await import(
+    "./shared/models/serviceRequest/serviceRequest.model"
+  );
   const { Vendor } = await import("./shared/models/vendor/vendor.model");
   const { Review } = await import("./shared/models/review/review.model");
-  const { PaymentTransaction } =
-    await import("./shared/models/payment/paymentTransaction.model");
-  // Captain models — share the same MongoDB as MainApp (strict: false stubs)
+  const { PaymentTransaction } = await import(
+    "./shared/models/payment/paymentTransaction.model"
+  );
+  const { Policy } = await import("./shared/models/policy.model");
+  const { RolePermission } = await import(
+    "./shared/models/rolePermission.model"
+  );
+  // Captain models — read from same MongoDB as MainApp
   await import("./shared/models/captain/captain.model");
   await import("./shared/models/captain/captainWallet.model");
   await import("./shared/models/captain/captainWalletTransaction.model");
@@ -42,17 +47,18 @@ async function syncIndexes() {
     Vendor.syncIndexes(),
     Review.syncIndexes(),
     PaymentTransaction.syncIndexes(),
+    Policy.syncIndexes(),
+    RolePermission.syncIndexes(),
   ]);
+
   console.info(
-    "[DB] User + Campaign + ServiceRequest + Vendor + Review + PaymentTransaction indexes synced",
+    "[DB] All model indexes synced (including Policy + RolePermission)",
   );
 }
 
 async function start() {
   await connectMongo();
 
-  // Sync indexes BEFORE accepting traffic so stale indexes are gone by the time
-  // the first request arrives.
   try {
     await syncIndexes();
   } catch (err) {
@@ -64,10 +70,10 @@ async function start() {
   try {
     await _app.listen({ port: env.PORT, host: "0.0.0.0" });
     _app.log.info(`Server running at http://0.0.0.0:${env.PORT}`);
-
-    // Initialize Socket.IO on the underlying HTTP server
     initSocketServer(_app.server);
     _app.log.info("Socket.IO server attached");
+
+    startFollowUpJob();
   } catch (err) {
     _app.log.error(err, "Failed to start server");
     await disconnectMongo();
@@ -75,18 +81,11 @@ async function start() {
   }
 }
 
-/**
- * Graceful shutdown sequence:
- * 1. Stop accepting new HTTP connections (Fastify close)
- * 2. Wait for in-flight requests to complete (Fastify drains)
- * 3. Disconnect from MongoDB
- * 4. Exit
- *
- * This ensures no DB operations are abruptly cut off mid-flight.
- */
 async function shutdown(signal: string) {
   if (!_app) return;
   _app.log.info({ signal }, "Graceful shutdown initiated");
+
+  stopFollowUpJob();
 
   try {
     await _app.close();
@@ -107,13 +106,10 @@ async function shutdown(signal: string) {
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
-
-// Catch unhandled promise rejections — log and exit to avoid zombie processes
 process.on("unhandledRejection", (reason) => {
   console.error("Unhandled Rejection:", reason);
   process.exit(1);
 });
-
 process.on("uncaughtException", (err) => {
   console.error("Uncaught Exception:", err);
   process.exit(1);

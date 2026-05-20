@@ -13,3 +13,4 @@ export * from "./notificationManagement.service";
 export * from "./supportTicket.service";
 export * from "./reportsAnalytics.service";
 export * from "./userManagement.service";
+export * from "./captainManagement.service";
